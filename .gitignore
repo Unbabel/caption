@@ -2,7 +2,7 @@
 *DS_Store
 data/
 experiments/
-configs/
+#configs/
 ._data
 
 # Byte-compiled / optimized / DLL files

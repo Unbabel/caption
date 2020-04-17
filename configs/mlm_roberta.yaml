@@ -1,0 +1,36 @@
+# MLM Domain adaptation of the RoBERTa base model.
+
+monitor: perplexity                      # Metric we want to use to decide earlystopping.
+metric_mode: min                         # If we want to minimize or maximize the metric.
+period: 1                                # Interval (number of epochs) between checkpoints.
+
+early_stopping: True                     # Flag to activate EarlyStopping
+patience: 2                              # Number of epochs with no improvement after which training will be stopped.  
+min_delta: 0.0                           # Minimum change in the monitored quantity.
+save_top_k: 3                            # The best k models according to the quantity monitored will be saved.
+min_epochs: 1                            # Min number of epochs. 
+max_epochs: 3                            # Max number of epochs. 
+
+gradient_clip_val: 1.0                   # Max norm of the gradients.
+gpus: 1                                  # Number of GPUs to use
+distributed_backend: dp                  # PyTorch Lightning Distributed training option
+batch_size: 4                            # Batch size to be used.
+accumulate_grad_batches: 3               # Gradient Accumulation.
+loader_workers: 3                        # Number of workers to load data.
+
+optimizer: Adam                          # Optimizer to be used.
+learning_rate: 0.00001                   # Learning rate for the language model.
+scheduler: constant                      # Leanring rate scheduler to be used.
+
+data_type: txt
+train_path: path/to/train/documents.txt  # Path to the Ted talks training documents. 
+dev_path: path/to/dev/documents.txt      # Path to the Ted talks dev documents.
+test_path: path/to/test/documents.txt    # Path to the Ted talks test documents.
+train_val_percent_check: 0.1
+
+model: MaskedLanguageModel               # Model architecture to be used.
+nr_frozen_epochs: 0                      # Number of epochs we want to keep the encoder model frozen.
+loss: cross_entropy                      # MLM loss function.
+
+encoder_model: RoBERTa                   # Encoder model to be used
+pretrained_model: roberta.base           # Pretrained model to be loaded from huggingface transformers.
