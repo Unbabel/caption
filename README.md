@@ -5,7 +5,7 @@ In this repository, we explore different strategies for automatic transcription 
 
 ## Model architecture:
 
-![base_model](https://i.ibb.co/sm3P2Bq/Screenshot-2020-04-14-at-16-19-10.png = 500x)
+<img src="https://i.ibb.co/sm3P2Bq/Screenshot-2020-04-14-at-16-19-10.png">
 
 ### Available Encoders:
 - [BERT](https://arxiv.org/abs/1810.04805)
