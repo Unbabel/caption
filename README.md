@@ -3,6 +3,8 @@
 
 In this repository, we explore different strategies for automatic transcription enrichment for ASR data which includes tasks such as automatic capitalization (truecasing) and punctuation recovery.
 
+> [Download IWSLT corpus](https://unbabel-experimental-data-sets.s3-eu-west-1.amazonaws.com/video-pt2020/IWSLT-punkt.tar.gz)
+
 ## Model architecture:
 
 ![base_model](images/base_model.png)
