@@ -13,7 +13,6 @@ class ScalarMixWithDropout(torch.nn.Module):
     If 'dropout > 0', then for each scalar weight, adjust its softmax weight mass to 0 with
     the dropout probability (i.e., setting the unnormalized weight to -inf). This effectively
     should redistribute dropped probability mass to all other weights.
-
     Original implementation:
         - https://github.com/Hyperparticle/udify
     """
