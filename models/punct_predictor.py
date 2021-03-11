@@ -6,21 +6,23 @@ Punctuation Predictor
 """
 import os
 from argparse import Namespace
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+import click
+import pytorch_lightning as pl
 import torch
+import torch.nn as nn
 import yaml
+from pytorch_lightning.metrics import F1, MetricCollection
+from pytorch_lightning.metrics.functional import accuracy
 from transformers import AdamW, AutoModel, AutoTokenizer
 from transformers.file_utils import ModelOutput
-from dataclasses import dataclass
-
-import pytorch_lightning as pl
-
-from pytorch_lightning.metrics.functional import accuracy
 from utils import Config
-from models.scalar_mix import ScalarMixWithDropout
+
 from models.data_module import LABEL_ENCODER
-from pytorch_lightning.metrics import MetricCollection, F1
+from models.scalar_mix import ScalarMixWithDropout
+from models.ser_metric import SlotErrorRate
 
 
 @dataclass
@@ -39,6 +41,8 @@ ATTR_TO_SPECIAL_TOKEN = {
     "additional_special_tokens": ["<en>", "<de>", "<it>", "<fr>"],
 }
 
+os.environ["TOKENIZERS_PARALLELISM"] = "1"
+
 class PunctuationPredictor(pl.LightningModule):
     """PyTorch Lightning DataModule.
 
@@ -48,23 +52,20 @@ class PunctuationPredictor(pl.LightningModule):
 
     class ModelConfig(Config):
         """The ModelConfig class is used to define Model settings.
-        :param pretrained_model: Pretrained GPT2 model to be used.
-        :param learning_rate: Learning Rate used during training.
-        :param lm_coef: Weight assigned to the LM loss.
-        :param mc_coef: Weight assigned to the Multiple-Choice loss.
-        :param train_data: Path to a json file containing the train data.
-        :param valid_data: Path to a json file containing the validation data.
-        :param batch_size: Batch Size used during training.
-        :param max_history: Max number of context sentences.
-        :param num_candidates: Number of distractors used during training.
         """
         pretrained_model: str = "xlm-roberta-base"
-
-        # Optimizer
-        learning_rate: float = 6.25e-5
         
         # Training details
         batch_size: int = 2
+        dropout: float = 0.1
+        nr_frozen_epochs: float = 0.4
+        keep_embeddings_frozen: bool = False
+        layerwise_decay: float = 0.95
+        encoder_learning_rate: float = 3.0e-5
+        learning_rate: float = 6.25e-5
+        binary_loss: int = 1
+        punct_loss: int = 1
+        
 
     def __init__(self, hparams: Namespace):
         super().__init__()
@@ -74,28 +75,97 @@ class PunctuationPredictor(pl.LightningModule):
         num_added_tokens = self.tokenizer.add_special_tokens(ATTR_TO_SPECIAL_TOKEN)
         self.encoder = AutoModel.from_pretrained(self.hparams.pretrained_model)
         self.encoder.resize_token_embeddings(orig_vocab + num_added_tokens)
+        # The encoder always starts in a frozen state.
+        if self.hparams.nr_frozen_epochs > 0:
+            self._frozen = True
+            self.freeze_encoder()
+        else:
+            self._frozen = False
+
+        if self.hparams.keep_embeddings_frozen:
+            self.freeze_embeddings()
+
         self.scalar_mix = ScalarMixWithDropout(
             mixture_size=self.encoder.config.num_hidden_layers +1,
             do_layer_norm=True,
-            dropout=self.hparams.scalar_mix_dropout,
+            dropout=self.hparams.dropout,
         )
+        self.head_dropout = nn.Dropout(self.hparams.dropout)
         self.binary_head = nn.Linear(2 * self.encoder.config.hidden_size, 2)
         self.punct_head  = nn.Linear(2 * self.encoder.config.hidden_size, len(LABEL_ENCODER))
         self.binary_f1 = F1(num_classes=1)
-        self.micro_f1 =F1(num_classes=len(LABEL_ENCODER), average="micro")
-        self.macro_f1 =F1(num_classes=len(LABEL_ENCODER), average="macro")
-        
+        self.micro_f1 = F1(num_classes=len(LABEL_ENCODER), average="micro")
+        self.macro_f1 = F1(num_classes=len(LABEL_ENCODER), average="macro")
+        self.ser = SlotErrorRate(padding=-100, ignore=0)
+
+    def freeze_embeddings(self) -> None:
+        """ Freezes the encoder layer. """
+        for param in self.encoder.embeddings.parameters():
+            param.requires_grad = False
+
+    def freeze_encoder(self) -> None:
+        """ Freezes the encoder layer. """
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+
+    def unfreeze_encoder(self) -> None:
+        """ un-freezes the encoder layer. """
+        if self._frozen:
+            click.secho(f"Encoder model fine-tuning", fg="red")
+            for param in self.encoder.parameters():
+                param.requires_grad = True
+            if self.hparams.keep_embeddings_frozen:
+                self.freeze_embeddings()
+            self._frozen = False
+
+    def layerwise_lr(self, lr: float, decay: float):
+        """
+        :return: List with grouped model parameters with layer-wise decaying learning rate
+        """
+        # Embedding Layer
+        opt_parameters = [
+            {
+                "params": self.encoder.embeddings.parameters(),
+                "lr": lr * decay ** (self.encoder.config.num_hidden_layers),
+            }
+        ]
+        # All layers
+        opt_parameters += [
+            {
+                "params": self.encoder.encoder.layer[l].parameters(),
+                "lr": lr * decay ** l,
+            }
+            for l in range(self.encoder.config.num_hidden_layers - 2, 0, -1)
+        ]
+        return opt_parameters
 
     def configure_optimizers(self):
-        optimizer = AdamW(
-            self.parameters(), lr=self.hparams.learning_rate, correct_bias=True
+        layer_parameters = self.layerwise_lr(
+            self.hparams.encoder_learning_rate, self.hparams.layerwise_decay
         )
-        #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min")
-        #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
-        return [optimizer], []
+        top_layers_parameters = [
+            {"params": self.binary_head.parameters(), "lr": self.hparams.learning_rate},
+            {"params": self.punct_head.parameters(), "lr": self.hparams.learning_rate},
+            {"params": self.scalar_mix.parameters(), "lr": self.hparams.learning_rate},
+            
+        ]
+        optimizer = AdamW(
+            layer_parameters + top_layers_parameters, lr=self.hparams.learning_rate, correct_bias=True
+        )
+        #print (self.total_steps)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=1)
+        return [optimizer], [scheduler]
 
-    def forward(self, input_ids, attention_mask, word_pointer, token_type_ids=None, binary_labels=None, punct_labels=None) -> PunctModelOutput:
-        _, _, all_layers = self.model(
+    def forward(
+        self, 
+        input_ids, 
+        word_pointer,
+        attention_mask, 
+        token_type_ids=None,  
+        binary_labels=None, 
+        punct_labels=None
+    ) -> PunctModelOutput:
+        _, _, all_layers = self.encoder(
             input_ids, attention_mask, output_hidden_states=True, return_dict=False
         )
         embeddings = self.scalar_mix(all_layers, attention_mask)
@@ -119,27 +189,20 @@ class PunctuationPredictor(pl.LightningModule):
             embeddings.shape[1],
             2 * self.encoder.config.hidden_size,
         )
-        binary_logits = self.binary_head(self.dropout(adjacent_embeddings))
-        punct_logits = self.punct_head(self.dropout(adjacent_embeddings))
+        binary_logits = self.binary_head(self.head_dropout(adjacent_embeddings))
+        punct_logits = self.punct_head(self.head_dropout(adjacent_embeddings))
         
-        loss_fct = CrossEntropyLoss()
-        if binary_labels:
+        loss_fct = nn.CrossEntropyLoss()
+
+        if (binary_labels is not None) and (punct_labels is not None):
             binary_loss = loss_fct(binary_logits.view(-1, binary_logits.size(-1)), binary_labels.view(-1))
-        else:
-            binary_loss = None
-
-        if punct_labels:
             punct_loss = loss_fct(punct_logits.view(-1, punct_logits.size(-1)), punct_labels.view(-1))
+            loss = self.hparams.binary_loss*binary_loss + self.hparams.punct_loss*punct_loss
+            return PunctModelOutput(binary_loss, binary_logits, punct_loss, punct_logits, loss, adjacent_embeddings)
         else:
-            punct_loss = None
-        
-        if punct_loss and binary_loss:
-            loss = punct_loss + binary_loss
-        else:
-            loss = None
+            return PunctModelOutput(None, binary_logits, None, punct_logits, None, adjacent_embeddings)
 
-        return PunctModelOutput(binary_logits, binary_loss, punct_logits, punct_loss, loss, adjacent_embeddings)
-
+            
     def training_step(
         self, batch: Tuple[torch.Tensor], batch_nb: int, *args, **kwargs
     ) -> Dict[str, torch.Tensor]:
@@ -152,16 +215,54 @@ class PunctuationPredictor(pl.LightningModule):
             - dictionary containing the loss and the metrics to be added to the lightning logger.
         """
         output = self.forward(*batch)
-        self.log('train_binary_f1_step', self.binary_f1(output.binary_logits, batch[-2]))
-        self.log('train_micro_f1_step', self.micro_f1(output.punct_logits, batch[-1]))
-        self.log('train_macro_f1_step', self.macro_f1(output.punct_logits, batch[-1]))
-        return {
-            "loss": output.loss,
-            "log": {
-                "loss": output.loss,
-            },
-        }
+        binary_pred, binary_target = (
+            torch.topk(output.binary_logits, 1)[1].view(-1),
+            batch[-2].view(-1),
+        )
+        mask = (binary_target != -100).bool()
+        binary_pred = torch.masked_select(binary_pred, mask)
+        binary_target = torch.masked_select(binary_target, mask)
+        
+        punct_pred, punct_target = (
+            torch.topk(output.punct_logits, 1)[1].view(-1),
+            batch[-1].view(-1),
+        )
+        mask = (punct_target != -100).bool()
+        punct_pred = torch.masked_select(punct_pred, mask)
+        punct_target = torch.masked_select(punct_target, mask)
+        
+        #ser = slot_error_rate(punct_pred, punct_target, ignore=0)
+        self.log('train_binary_f1', self.binary_f1(binary_pred, binary_target), on_epoch=False, on_step=True, logger=True)
+        self.log('train_micro_f1', self.micro_f1(punct_pred, punct_target), on_epoch=False, on_step=True, logger=True)
+        self.log('train_macro_f1', self.macro_f1(punct_pred, punct_target), on_epoch=False, on_step=True, logger=True)
+        self.log('train_ser', self.ser(punct_pred, punct_target), on_epoch=False, on_step=True, logger=True)
+        
+        self.log('loss', output.loss, logger=True)
+        self.log('binary_loss', output.binary_loss, logger=True)
+        self.log('punct_loss', output.punct_loss, logger=True)
+        
+        if (
+            self.hparams.nr_frozen_epochs < 1.0
+            and self.hparams.nr_frozen_epochs > 0.0
+            and batch_nb > (
+                len(self.trainer.datamodule.train_dataloader()) * self.hparams.nr_frozen_epochs
+            )
+        ):
+            self.unfreeze_encoder()
+            self._frozen = False
+
+        return output.loss
     
+    def training_epoch_end(self, outs):
+        # log epoch metric
+        self.log('train_binary_f1', self.binary_f1.compute(), on_epoch=True, logger=True)
+        self.log('train_micro_f1', self.micro_f1.compute(), on_epoch=True, logger=True)
+        self.log('train_macro_f1', self.macro_f1.compute(), on_epoch=True, logger=True)
+        self.log('train_ser', self.ser.compute(), on_epoch=True, logger=True)
+        self.binary_f1.reset()
+        self.micro_f1.reset()
+        self.macro_f1.reset()
+
     def validation_step(
         self, batch: Tuple[torch.Tensor], batch_nb: int, *args, **kwargs
     ) -> Dict[str, torch.Tensor]:
@@ -169,35 +270,40 @@ class PunctuationPredictor(pl.LightningModule):
         :returns: dictionary passed to the validation_end function.
         """
         output = self.forward(*batch)
-        return {
-            "val_loss": output.loss,
-            "val_binary_f1": self.binary_f1(output.binary_logits, batch[-2]),
-            "val_micro_f1": self.micro_f1(output.punct_logits, batch[-1]),
-            "val_macro_f1": self.micro_f1(output.punct_logits, batch[-1]),
-        }
+        
+        binary_pred, binary_target = (
+            torch.topk(output.binary_logits, 1)[1].view(-1),
+            batch[-2].view(-1),
+        )
+        mask = (binary_target != -100).bool()
+        binary_pred = torch.masked_select(binary_pred, mask)
+        binary_target = torch.masked_select(binary_target, mask)
+        
+        punct_pred, punct_target = (
+            torch.topk(output.punct_logits, 1)[1].view(-1),
+            batch[-1].view(-1),
+        )
+        mask = (punct_target != -100).bool()
+        punct_pred = torch.masked_select(punct_pred, mask)
+        punct_target = torch.masked_select(punct_target, mask)
+        self.log('binary_f1', self.binary_f1(binary_pred, binary_target), prog_bar=True)
+        self.log('micro_f1', self.micro_f1(punct_pred, punct_target), prog_bar=True)
+        self.log('macro_f1', self.macro_f1(punct_pred, punct_target), prog_bar=True)
+        self.log('ser', self.ser(punct_pred, punct_target), prog_bar=True)
+        return output.loss
 
     def validation_epoch_end(
         self, outputs: List[Dict[str, torch.Tensor]]
     ) -> Dict[str, torch.Tensor]:
-        """Function that takes as input a list of dictionaries returned by the validation_step
-        function and measures the model performance accross the entire validation set.
-        Returns:
-            - Dictionary with metrics to be added to the lightning logger.
-        """
-        # Average all metrics
-        metrics = {
-            "val_loss": torch.stack(
-                [x["val_loss"] for x in outputs]
-            ).mean(),
-            "val_binary_f1": torch.stack([x["val_binary_f1"] for x in outputs]).mean(),
-            "val_micro_f1": torch.stack([x["val_micro_f1"] for x in outputs]).mean(),
-            "val_macro_f1": torch.stack([x["val_macro_f1"] for x in outputs]).mean(),
-        }
-        return {
-            "progress_bar": metrics,
-            "log": metrics,
-        }
-
+        # log epoch metric
+        self.log('binary_f1', self.binary_f1.compute(), on_epoch=True, prog_bar=True, logger=True)
+        self.log('micro_f1', self.micro_f1.compute(), on_epoch=True, prog_bar=True, logger=True)
+        self.log('macro_f1', self.macro_f1.compute(), on_epoch=True, prog_bar=True, logger=True)
+        self.log('ser', self.ser.compute(), on_epoch=True, prog_bar=True, logger=True)
+        self.binary_f1.reset()
+        self.micro_f1.reset()
+        self.macro_f1.reset()
+        
     @classmethod
     def from_experiment(cls, experiment_folder: str):
         """Function that loads the model from an experiment folder.

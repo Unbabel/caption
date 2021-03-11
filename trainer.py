@@ -48,7 +48,7 @@ class TrainerConfig(Config):
 
     seed: int = 3
     deterministic: bool = True
-    verbose: bool = False
+    verbose: bool = True
     overfit_batches: float = 0.0
 
     # Model Checkpoint & Early Stopping
@@ -101,14 +101,12 @@ def build_trainer(hparams: Namespace) -> pl.Trainer:
         verbose=hparams.verbose,
         monitor=hparams.monitor,
         save_weights_only=hparams.save_weights_only,
-        period=0,  # Always allow saving checkpoint even within the same epoch
         mode=hparams.metric_mode,
     )
 
     trainer = pl.Trainer(
         logger=tb_logger,
-        checkpoint_callback=checkpoint_callback,
-        callbacks=[LearningRateMonitor(), ProgressBar(), early_stop_callback],
+        callbacks=[LearningRateMonitor(), ProgressBar(), early_stop_callback, checkpoint_callback],
         gradient_clip_val=hparams.gradient_clip_val,
         gpus=hparams.gpus,
         log_gpu_memory="all",
