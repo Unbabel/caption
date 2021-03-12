@@ -13,7 +13,7 @@ from pytorch_lightning.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
-    ProgressBar
+    ProgressBar,
 )
 from pytorch_lightning.loggers import TensorBoardLogger
 from utils import Config
@@ -106,7 +106,12 @@ def build_trainer(hparams: Namespace) -> pl.Trainer:
 
     trainer = pl.Trainer(
         logger=tb_logger,
-        callbacks=[LearningRateMonitor(), ProgressBar(), early_stop_callback, checkpoint_callback],
+        callbacks=[
+            early_stop_callback,
+            LearningRateMonitor(),
+            ProgressBar(),
+            checkpoint_callback,
+        ],
         gradient_clip_val=hparams.gradient_clip_val,
         gpus=hparams.gpus,
         log_gpu_memory="all",
@@ -122,5 +127,6 @@ def build_trainer(hparams: Namespace) -> pl.Trainer:
         precision=hparams.precision,
         weights_summary="top",
         profiler=hparams.profiler,
+        move_metrics_to_cpu=True,
     )
     return trainer

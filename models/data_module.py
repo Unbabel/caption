@@ -67,13 +67,12 @@ MODEL_INPUTS = [
     "binary_label",
     "punct_label",
 ]
-CHUNK_SIZE = 250
 
 ATTR_TO_SPECIAL_TOKEN = {
     "bos_token": "<bos>",
     "eos_token": "<eos>",
     "pad_token": "<pad>",
-    "additional_special_tokens": ["<en>", "<de>", "<it>", "<fr>"],
+    # "additional_special_tokens": ["<en>", "<de>", "<it>", "<fr>"],
 }
 
 
@@ -88,10 +87,10 @@ class DataModule(pl.LightningDataModule):
         self.hparams = hparams
         self.tokenizer = tokenizer
         self.language_pairs = {
-            "en": self.tokenizer.get_vocab()["<en>"],
-            "de": self.tokenizer.get_vocab()["<de>"],
-            "fr": self.tokenizer.get_vocab()["<fr>"],
-            "it": self.tokenizer.get_vocab()["<it>"],
+            "en": 0,
+            "de": 1,
+            "fr": 2,
+            "it": 3,
         }
 
     def preprocess_file(self, filename, language):
@@ -143,7 +142,10 @@ class DataModule(pl.LightningDataModule):
 
         for _input in model_inputs["input_ids"]:
             model_inputs["token_type_ids"].append(
-                [self.language_pairs[language] for _ in _input]
+                [
+                    self.language_pairs[language]
+                    for _ in range(self.tokenizer.model_max_length)
+                ]
             )
             model_inputs["attention_mask"].append([1 for _ in _input])
 
@@ -227,7 +229,7 @@ class DataModule(pl.LightningDataModule):
         for input_name in dataset.keys():
             max_l = (
                 self.tokenizer.model_max_length
-                if "_ids" in input_name
+                if "input_ids" in input_name
                 else max(len(x) for x in dataset[input_name])
             )
             if input_name == "attention_mask":
