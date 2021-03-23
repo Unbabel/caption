@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import torch
-from torch.nn import ParameterList, Parameter
+from torch.nn import Parameter, ParameterList
 
 
 class ScalarMixWithDropout(torch.nn.Module):

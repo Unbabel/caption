@@ -4,23 +4,18 @@ DataModule
     The DataModule encapsulates all the steps needed to process data.
 """
 import hashlib
-import json
 import multiprocessing
 import os
 from argparse import Namespace
 from collections import defaultdict
-from itertools import chain
 from os import path
-from typing import Dict, List
 
 import click
-import pandas as pd
 import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 from torchnlp.download import download_file_maybe_extract
 from tqdm import tqdm
-from transformers import AutoTokenizer
 
 SEPP_NLG_URL = "https://unbabel-experimental-data-sets.s3-eu-west-1.amazonaws.com/video-pt2020/sepp_nlg_2021_train_dev_data.zip"
 
@@ -63,7 +58,7 @@ MODEL_INPUTS = [
     "input_ids",
     "word_pointer",
     "attention_mask",
-    "token_type_ids",
+    # "token_type_ids",
     "binary_label",
     "punct_label",
 ]
@@ -93,23 +88,25 @@ class DataModule(pl.LightningDataModule):
             "it": 3,
         }
 
-    def preprocess_file(self, filename, language):
+    def preprocess_file(self, filename, language, testing=False):
         model_inputs = {
             "input_ids": [],
             "attention_mask": [],
-            "token_type_ids": [],
             "word_pointer": [],
-            "binary_label": [],
-            "punct_label": [],
         }
+        if not testing:
+            model_inputs["binary_label"] = []
+            model_inputs["punct_label"] = []
+
         model_inputs["input_ids"].append(
             [
                 self.tokenizer.bos_token_id,
             ]
         )
         model_inputs["word_pointer"].append([])
-        model_inputs["binary_label"].append([])
-        model_inputs["punct_label"].append([])
+        if not testing:
+            model_inputs["binary_label"].append([])
+            model_inputs["punct_label"].append([])
 
         for i, line in enumerate(open(filename).readlines()):
             line = line.strip().split("\t")
@@ -123,8 +120,9 @@ class DataModule(pl.LightningDataModule):
                     len(model_inputs["input_ids"][-1])
                 )
                 model_inputs["input_ids"][-1] += subwords
-                model_inputs["binary_label"][-1].append(int(line[1]))
-                model_inputs["punct_label"][-1].append(LABEL_ENCODER[line[2]])
+                if not testing:
+                    model_inputs["binary_label"][-1].append(int(line[1]))
+                    model_inputs["punct_label"][-1].append(LABEL_ENCODER[line[2]])
 
             else:
                 model_inputs["input_ids"][-1].append(self.tokenizer.eos_token_id)
@@ -134,19 +132,22 @@ class DataModule(pl.LightningDataModule):
                     ]
                 )
                 model_inputs["word_pointer"].append([])
-                model_inputs["binary_label"].append([])
-                model_inputs["punct_label"].append([])
+                if not testing:
+                    model_inputs["binary_label"].append([])
+                    model_inputs["punct_label"].append([])
+
+                model_inputs["word_pointer"][-1].append(
+                    len(model_inputs["input_ids"][-1])
+                )
+                model_inputs["input_ids"][-1] += subwords
+                if not testing:
+                    model_inputs["binary_label"][-1].append(int(line[1]))
+                    model_inputs["punct_label"][-1].append(LABEL_ENCODER[line[2]])
 
         if len(model_inputs["input_ids"][-1]) != 1:
             model_inputs["input_ids"][-1].append(self.tokenizer.eos_token_id)
 
         for _input in model_inputs["input_ids"]:
-            model_inputs["token_type_ids"].append(
-                [
-                    self.language_pairs[language]
-                    for _ in range(self.tokenizer.model_max_length)
-                ]
-            )
             model_inputs["attention_mask"].append([1 for _ in _input])
 
         return model_inputs

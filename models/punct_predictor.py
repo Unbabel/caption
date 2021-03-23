@@ -7,15 +7,14 @@ Punctuation Predictor
 import os
 from argparse import Namespace
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import click
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import yaml
-from pytorch_lightning.metrics import F1, MetricCollection
-from pytorch_lightning.metrics.functional import accuracy
+from pytorch_lightning.metrics import F1
 from transformers import AdamW, AutoModel, AutoTokenizer
 from transformers.file_utils import ModelOutput
 from utils import Config
@@ -60,7 +59,7 @@ class PunctuationPredictor(pl.LightningModule):
         # Training details
         batch_size: int = 2
         dropout: float = 0.1
-        language_factors: bool = False
+        # language_factors: bool = False # Deprecated!
         nr_frozen_epochs: float = 0.4
         keep_embeddings_frozen: bool = False
         layerwise_decay: float = 0.95
@@ -78,10 +77,11 @@ class PunctuationPredictor(pl.LightningModule):
         self.encoder = AutoModel.from_pretrained(self.hparams.pretrained_model)
         self.encoder.resize_token_embeddings(orig_vocab + num_added_tokens)
 
-        if self.hparams.language_factors:
-            self.language_embeddings = nn.Embedding(
-                len(LANGUAGE_PAIRS), self.encoder.config.hidden_size
-            )
+        # Deprecated!
+        # if self.hparams.language_factors:
+        #    self.language_embeddings = nn.Embedding(
+        #        len(LANGUAGE_PAIRS), self.encoder.config.hidden_size
+        #    )
 
         # The encoder always starts in a frozen state.
         if self.hparams.nr_frozen_epochs > 0:
@@ -172,25 +172,27 @@ class PunctuationPredictor(pl.LightningModule):
         input_ids,
         word_pointer,
         attention_mask,
-        token_type_ids=None,
+        # token_type_ids=None,
         binary_labels=None,
         punct_labels=None,
     ) -> PunctModelOutput:
-        if self.hparams.language_factors:
-            word_embeddings = self.encoder.embeddings.word_embeddings(input_ids)
-            language_embeddings = self.language_embeddings(token_type_ids)
-            inputs_embeds = word_embeddings + language_embeddings
-            _, _, all_layers = self.encoder(
-                None,
-                attention_mask,
-                inputs_embeds=inputs_embeds,
-                output_hidden_states=True,
-                return_dict=False,
-            )
-        else:
-            _, _, all_layers = self.encoder(
-                input_ids, attention_mask, output_hidden_states=True, return_dict=False
-            )
+        # Deprecated!
+
+        # if self.hparams.language_factors:
+        #    word_embeddings = self.encoder.embeddings.word_embeddings(input_ids)
+        #    language_embeddings = self.language_embeddings(token_type_ids)
+        #    inputs_embeds = word_embeddings + language_embeddings
+        #    _, _, all_layers = self.encoder(
+        #        None,
+        #        attention_mask,
+        #        inputs_embeds=inputs_embeds,
+        #        output_hidden_states=True,
+        #        return_dict=False,
+        #    )
+        # else:
+        _, _, all_layers = self.encoder(
+            input_ids, attention_mask, output_hidden_states=True, return_dict=False
+        )
 
         embeddings = self.scalar_mix(all_layers, attention_mask)
         embeddings = torch.cat(
@@ -239,6 +241,26 @@ class PunctuationPredictor(pl.LightningModule):
             return PunctModelOutput(
                 None, binary_logits, None, punct_logits, None, adjacent_embeddings
             )
+
+    def predict(self, batch):
+        # Creating a mask to ignore pad, bos and eos tokens
+        input_ids = batch[1].clone()
+        input_ids[
+            input_ids == self.tokenizer.eos_token_id
+        ] = self.tokenizer.pad_token_id
+        mask = (input_ids != self.tokenizer.pad_token_id).bool()
+        mask[:, 0] = 1
+
+        label_decoder = {v: k for k, v in LABEL_ENCODER.items()}
+        with torch.no_grad():
+            batch = [model_input.cuda() for model_input in batch]
+            output = self.forward(*batch)
+            binary_pred = torch.topk(output.binary_logits, 1)[1].view(-1)
+            punct_pred = torch.topk(output.punct_logits, 1)[1].view(-1)
+            binary_pred = torch.masked_select(binary_pred, mask.view(-1))
+            punct_pred = torch.masked_select(punct_pred, mask.view(-1))
+            punct_pred = [label_decoder[label] for label in punct_pred.cpu().tolist()]
+            return binary_pred.cpu().tolist(), punct_pred
 
     def training_step(
         self, batch: Tuple[torch.Tensor], batch_nb: int, *args, **kwargs
@@ -397,9 +419,13 @@ class PunctuationPredictor(pl.LightningModule):
         hparams = yaml.load(open(hparams_file).read(), Loader=yaml.FullLoader)
 
         checkpoints = [
-            file for file in os.listdir(experiment_folder) if file.endswith(".ckpt")
+            file
+            for file in os.listdir(experiment_folder + "checkpoints/")
+            if file.endswith(".ckpt")
         ]
-        checkpoint_path = os.path.join(experiment_folder, checkpoints[-1])
+        checkpoint_path = os.path.join(
+            experiment_folder + "checkpoints/", checkpoints[-1]
+        )
         model = cls.load_from_checkpoint(
             checkpoint_path, hparams=Namespace(**hparams), strict=True
         )
