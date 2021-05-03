@@ -77,7 +77,7 @@ def train(config: str) -> None:
     required=True,
 )
 @click.option(
-    "--dev/--test",
+    "--test/--surprise_test",
     default=True,
     help="Flag that either runs devset or testset.",
     show_default=True,
@@ -85,7 +85,7 @@ def train(config: str) -> None:
 @click.option(
     "--dataset",
     type=click.Path(exists=True),
-    default="data/sepp_nlg_2021_data/",
+    default="data/sepp_nlg_2021_test_data_unlabeled_v5/",
     help="Path to the folder containing the dataset.",
 )
 @click.option(
@@ -103,7 +103,7 @@ def train(config: str) -> None:
 def predict(
     model: str,
     language: str,
-    dev: bool,
+    test: bool,
     dataset: str,
     prediction_dir: str,
     batch_size: int,
@@ -117,8 +117,11 @@ def predict(
     prediction_dir = (
         prediction_dir if prediction_dir.endswith("/") else prediction_dir + "/"
     )
-    test_folder = dataset + f"{language}/" + ("dev/" if dev else "test/")
-    output_folder = prediction_dir + f"{language}/" + ("dev/" if dev else "test/")
+    test_folder = dataset + f"{language}/" + ("test/" if test else "surprise_test/")
+    output_folder = prediction_dir + f"{language}/" + ("test/" if test else "surprise_test/")
+    
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
 
     click.secho(f"Loading model from folder: {model}", fg="yellow")
     model = PunctuationPredictor.from_experiment(model)
