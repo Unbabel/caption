@@ -77,7 +77,7 @@ def train(config: str) -> None:
     required=True,
 )
 @click.option(
-    "--test/--surprise_test",
+    "--test/--dev",
     default=True,
     help="Flag that either runs devset or testset.",
     show_default=True,
@@ -85,13 +85,13 @@ def train(config: str) -> None:
 @click.option(
     "--dataset",
     type=click.Path(exists=True),
-    default="data/sepp_nlg_2021_test_data_unlabeled_v5/",
+    default="data/sepp_nlg_2021_data/",
     help="Path to the folder containing the dataset.",
 )
 @click.option(
     "--prediction_dir",
     type=click.Path(exists=True),
-    default="data/pred/",
+    default="data/Unbabel-INESC/",
     help="Folder used to save predictions.",
 )
 @click.option(
@@ -117,9 +117,9 @@ def predict(
     prediction_dir = (
         prediction_dir if prediction_dir.endswith("/") else prediction_dir + "/"
     )
-    test_folder = dataset + f"{language}/" + ("test/" if test else "surprise_test/")
-    output_folder = prediction_dir + f"{language}/" + ("test/" if test else "surprise_test/")
-    
+    test_folder = dataset + f"{language}/" + ("test/" if test else "dev/")
+    output_folder = prediction_dir + f"{language}/" + ("test/" if test else "dev/")
+
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
@@ -269,7 +269,6 @@ def search(config: str, n_trials: int) -> None:
 
     except Exception as e:
         click.secho(f"Failed to create plot: {e}", fg="red")
-
 
 
 if __name__ == "__main__":

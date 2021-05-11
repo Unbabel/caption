@@ -17,6 +17,14 @@ The goal of the shared task is to build models for identifying the end of a sent
 
 ![base_model](images/base_model.png)
 
+### Pretrained Model:
+
+To download the model used to participate in the shared task simply run:
+
+```bash
+wget https://unbabel-experimental-models.s3.amazonaws.com/caption/optuna-xlmr-large-v5.zip
+```
+
 ## Installation:
 
 This project uses Python >3.6
