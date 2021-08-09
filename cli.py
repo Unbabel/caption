@@ -195,12 +195,6 @@ def test(
         num_workers=multiprocessing.cpu_count(),
     )
     for batch in dataloader:
-        print(batch[-1].shape)
-        punct_labels = batch[-1].view(-1)
-        print(punct_labels.shape)
-        mask = (punct_labels != -100).bool() # Let's remove padding
-        punct_labels = torch.masked_select(punct_labels, mask)
-        print(punct_labels.shape)
         cap_y_hat, punct_y_hat = model.predict(batch, encode=False)
         if (cap_y_hat is None) and (punct_y_hat is None):
             continue
