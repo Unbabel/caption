@@ -19,15 +19,15 @@ from transformers import AdamW, AutoModel, AutoTokenizer
 from transformers.file_utils import ModelOutput
 from utils import Config
 
-from models.data_module import LABEL_ENCODER
+from models.data_module import PUNCTUATION_LABEL_ENCODER, CAPITALIZATION_LABEL_ENCODER
 from models.scalar_mix import ScalarMixWithDropout
 from models.ser_metric import SlotErrorRate
 
 
 @dataclass
 class PunctModelOutput(ModelOutput):
-    binary_loss: torch.FloatTensor = None
-    binary_logits: torch.FloatTensor = None
+    cap_loss: torch.FloatTensor = None
+    cap_logits: torch.FloatTensor = None
     punct_loss: torch.FloatTensor = None
     punct_logits: torch.FloatTensor = None
     loss: torch.FloatTensor = None
@@ -65,7 +65,7 @@ class PunctuationPredictor(pl.LightningModule):
         layerwise_decay: float = 0.95
         encoder_learning_rate: float = 3.0e-5
         learning_rate: float = 6.25e-5
-        binary_loss: int = 1
+        cap_loss: int = 1
         punct_loss: int = 1
 
     def __init__(self, hparams: Namespace):
@@ -76,12 +76,6 @@ class PunctuationPredictor(pl.LightningModule):
         num_added_tokens = self.tokenizer.add_special_tokens(ATTR_TO_SPECIAL_TOKEN)
         self.encoder = AutoModel.from_pretrained(self.hparams.pretrained_model)
         self.encoder.resize_token_embeddings(orig_vocab + num_added_tokens)
-
-        # Deprecated!
-        # if self.hparams.language_factors:
-        #    self.language_embeddings = nn.Embedding(
-        #        len(LANGUAGE_PAIRS), self.encoder.config.hidden_size
-        #    )
 
         # The encoder always starts in a frozen state.
         if self.hparams.nr_frozen_epochs > 0:
@@ -99,14 +93,18 @@ class PunctuationPredictor(pl.LightningModule):
             dropout=self.hparams.dropout,
         )
         self.head_dropout = nn.Dropout(self.hparams.dropout)
-        self.binary_head = nn.Linear(2 * self.encoder.config.hidden_size, 2)
+        self.cap_head = nn.Linear(2 * self.encoder.config.hidden_size, len(CAPITALIZATION_LABEL_ENCODER))
         self.punct_head = nn.Linear(
-            2 * self.encoder.config.hidden_size, len(LABEL_ENCODER)
+            2 * self.encoder.config.hidden_size, len(PUNCTUATION_LABEL_ENCODER)
         )
-        self.binary_f1 = F1(num_classes=1)
-        self.micro_f1 = F1(num_classes=len(LABEL_ENCODER), average="micro")
-        self.macro_f1 = F1(num_classes=len(LABEL_ENCODER), average="macro")
-        self.ser = SlotErrorRate(padding=-100, ignore=0)
+        self.cap_micro_f1 = F1(num_classes=len(CAPITALIZATION_LABEL_ENCODER), average="micro")
+        self.cap_macro_f1 = F1(num_classes=len(CAPITALIZATION_LABEL_ENCODER), average="macro")
+        self.punct_micro_f1 = F1(num_classes=len(PUNCTUATION_LABEL_ENCODER), average="micro")
+        self.punct_macro_f1 = F1(num_classes=len(PUNCTUATION_LABEL_ENCODER), average="macro")
+        self.punct_ser = SlotErrorRate(padding=-100, ignore=0)
+        self.cap_ser = SlotErrorRate(padding=-100)
+        self.punct_loss_fct = nn.CrossEntropyLoss(ignore_index=-100) # Using the ignore_index prevents the model from learning that PAD is followed by PAD
+        self.cap_loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
 
     def freeze_embeddings(self) -> None:
         """ Freezes the encoder layer. """
@@ -154,7 +152,7 @@ class PunctuationPredictor(pl.LightningModule):
             self.hparams.encoder_learning_rate, self.hparams.layerwise_decay
         )
         top_layers_parameters = [
-            {"params": self.binary_head.parameters(), "lr": self.hparams.learning_rate},
+            {"params": self.cap_head.parameters(), "lr": self.hparams.learning_rate},
             {"params": self.punct_head.parameters(), "lr": self.hparams.learning_rate},
             {"params": self.scalar_mix.parameters(), "lr": self.hparams.learning_rate},
         ]
@@ -173,23 +171,10 @@ class PunctuationPredictor(pl.LightningModule):
         word_pointer,
         attention_mask,
         # token_type_ids=None,
-        binary_labels=None,
+        cap_labels=None,
         punct_labels=None,
     ) -> PunctModelOutput:
-        # Deprecated!
 
-        # if self.hparams.language_factors:
-        #    word_embeddings = self.encoder.embeddings.word_embeddings(input_ids)
-        #    language_embeddings = self.language_embeddings(token_type_ids)
-        #    inputs_embeds = word_embeddings + language_embeddings
-        #    _, _, all_layers = self.encoder(
-        #        None,
-        #        attention_mask,
-        #        inputs_embeds=inputs_embeds,
-        #        output_hidden_states=True,
-        #        return_dict=False,
-        #    )
-        # else:
         _, _, all_layers = self.encoder(
             input_ids, attention_mask, output_hidden_states=True, return_dict=False
         )
@@ -213,25 +198,24 @@ class PunctuationPredictor(pl.LightningModule):
             embeddings.shape[1],
             2 * self.encoder.config.hidden_size,
         )
-        binary_logits = self.binary_head(self.head_dropout(adjacent_embeddings))
+        cap_logits = self.cap_head(self.head_dropout(adjacent_embeddings))
         punct_logits = self.punct_head(self.head_dropout(adjacent_embeddings))
 
-        loss_fct = nn.CrossEntropyLoss()
-
-        if (binary_labels is not None) and (punct_labels is not None):
-            binary_loss = loss_fct(
-                binary_logits.view(-1, binary_logits.size(-1)), binary_labels.view(-1)
+        if (cap_labels is not None) and (punct_labels is not None):
+            cap_loss = self.cap_loss_fct(
+                #TODO(joao.janeiro@) Is this only ignoring the first character of the batch? Or ignoring the first character of every sentence?
+                cap_logits.view(-1, cap_logits.size(-1))[1:, :], cap_labels.view(-1)[1:] # We ignore the first position, so it doesn't learn to capitalise based on position
             )
-            punct_loss = loss_fct(
+            punct_loss = self.punct_loss_fct(
                 punct_logits.view(-1, punct_logits.size(-1)), punct_labels.view(-1)
             )
             loss = (
-                self.hparams.binary_loss * binary_loss
+                self.hparams.cap_loss * cap_loss
                 + self.hparams.punct_loss * punct_loss
             )
             return PunctModelOutput(
-                binary_loss,
-                binary_logits,
+                cap_loss,
+                cap_logits,
                 punct_loss,
                 punct_logits,
                 loss,
@@ -239,28 +223,44 @@ class PunctuationPredictor(pl.LightningModule):
             )
         else:
             return PunctModelOutput(
-                None, binary_logits, None, punct_logits, None, adjacent_embeddings
+                None, cap_logits, None, punct_logits, None, adjacent_embeddings
             )
 
-    def predict(self, batch):
+    def predict(self, batch, encode: bool):
         # Creating a mask to ignore pad, bos and eos tokens
         input_ids = batch[1].clone()
         input_ids[
             input_ids == self.tokenizer.eos_token_id
         ] = self.tokenizer.pad_token_id
         mask = (input_ids != self.tokenizer.pad_token_id).bool()
-        mask[:, 0] = 1
 
-        label_decoder = {v: k for k, v in LABEL_ENCODER.items()}
+        try:
+            mask[:, 0] = 1
+        except:
+            # If the file was empty
+            return None, None
+
+        punct_label_decoder = {v: k for k, v in PUNCTUATION_LABEL_ENCODER.items()}
+        cap_label_decoder = {v: k for k, v in CAPITALIZATION_LABEL_ENCODER.items()}
         with torch.no_grad():
             batch = [model_input.cuda() for model_input in batch]
             output = self.forward(*batch)
-            binary_pred = torch.topk(output.binary_logits, 1)[1].view(-1)
+            print("Model output {}".format(output.cap_logits.shape))
+            cap_pred = torch.topk(output.cap_logits, 1)[1].view(-1)
+            print("After topk {}".format(cap_pred.shape))
+            print("Topk without view(-1){}".format(torch.topk(output.cap_logits, 1)[1].shape))
+            
             punct_pred = torch.topk(output.punct_logits, 1)[1].view(-1)
-            binary_pred = torch.masked_select(binary_pred, mask.view(-1))
-            punct_pred = torch.masked_select(punct_pred, mask.view(-1))
-            punct_pred = [label_decoder[label] for label in punct_pred.cpu().tolist()]
-            return binary_pred.cpu().tolist(), punct_pred
+            cap_pred = torch.masked_select(cap_pred, mask.view(-1).cuda())
+            print("After mask {}".format(cap_pred.shape))
+            print('-----')
+            punct_pred = torch.masked_select(punct_pred, mask.view(-1).cuda())
+            punct_pred = punct_pred.cpu().tolist()
+            cap_pred = cap_pred.cpu().tolist()
+            if encode:
+                punct_pred = [punct_label_decoder[label] for label in punct_pred]
+                cap_pred = [cap_label_decoder[label] for label in cap_pred]
+            return cap_pred, punct_pred
 
     def training_step(
         self, batch: Tuple[torch.Tensor], batch_nb: int, *args, **kwargs
@@ -274,13 +274,13 @@ class PunctuationPredictor(pl.LightningModule):
             - dictionary containing the loss and the metrics to be added to the lightning logger.
         """
         output = self.forward(*batch)
-        binary_pred, binary_target = (
-            torch.topk(output.binary_logits, 1)[1].view(-1),
+        cap_pred, cap_target = (
+            torch.topk(output.cap_logits, 1)[1].view(-1),
             batch[-2].view(-1),
         )
-        mask = (binary_target != -100).bool()
-        binary_pred = torch.masked_select(binary_pred, mask)
-        binary_target = torch.masked_select(binary_target, mask)
+        mask = (cap_target != -100).bool() # Let's remove padding
+        cap_pred = torch.masked_select(cap_pred, mask)
+        cap_target = torch.masked_select(cap_target, mask)
 
         punct_pred, punct_target = (
             torch.topk(output.punct_logits, 1)[1].view(-1),
@@ -292,36 +292,50 @@ class PunctuationPredictor(pl.LightningModule):
 
         # ser = slot_error_rate(punct_pred, punct_target, ignore=0)
         self.log(
-            "train_binary_f1",
-            self.binary_f1(binary_pred, binary_target),
+            "train_cap_micro_f1",
+            self.cap_micro_f1(cap_pred, cap_target),
             on_epoch=False,
             on_step=True,
             logger=True,
         )
         self.log(
-            "train_micro_f1",
-            self.micro_f1(punct_pred, punct_target),
+            "train_cap_macro_f1",
+            self.cap_macro_f1(cap_pred, cap_target),
             on_epoch=False,
             on_step=True,
             logger=True,
         )
         self.log(
-            "train_macro_f1",
-            self.macro_f1(punct_pred, punct_target),
+            "train_punct_micro_f1",
+            self.punct_micro_f1(punct_pred, punct_target),
             on_epoch=False,
             on_step=True,
             logger=True,
         )
         self.log(
-            "train_ser",
-            self.ser(punct_pred, punct_target),
+            "train_punct_macro_f1",
+            self.punct_macro_f1(punct_pred, punct_target),
+            on_epoch=False,
+            on_step=True,
+            logger=True,
+        )
+        self.log(
+            "train_punct_ser",
+            self.punct_ser(punct_pred, punct_target),
+            on_epoch=False,
+            on_step=True,
+            logger=True,
+        )
+        self.log(
+            "train_cap_ser",
+            self.cap_ser(cap_pred, cap_target),
             on_epoch=False,
             on_step=True,
             logger=True,
         )
 
         self.log("loss", output.loss, logger=True)
-        self.log("binary_loss", output.binary_loss, logger=True)
+        self.log("cap_loss", output.cap_loss, logger=True)
         self.log("punct_loss", output.punct_loss, logger=True)
 
         if (
@@ -341,14 +355,25 @@ class PunctuationPredictor(pl.LightningModule):
     def training_epoch_end(self, outs):
         # log epoch metric
         self.log(
-            "train_binary_f1", self.binary_f1.compute(), on_epoch=True, logger=True
+            "train_cap_micro_f1", self.cap_micro_f1.compute(), on_epoch=True, logger=True
         )
-        self.log("train_micro_f1", self.micro_f1.compute(), on_epoch=True, logger=True)
-        self.log("train_macro_f1", self.macro_f1.compute(), on_epoch=True, logger=True)
-        self.log("train_ser", self.ser.compute(), on_epoch=True, logger=True)
-        self.binary_f1.reset()
-        self.micro_f1.reset()
-        self.macro_f1.reset()
+        self.log(
+            "train_cap_macro_f1", self.cap_macro_f1.compute(), on_epoch=True, logger=True
+        )
+        self.log("train_punct_micro_f1", self.punct_micro_f1.compute(), on_epoch=True, logger=True)
+        self.log("train_punct_macro_f1", self.punct_macro_f1.compute(), on_epoch=True, logger=True)
+        self.log("train_punct_ser", self.punct_ser.compute(), on_epoch=True, logger=True)
+        self.log("train_cap_ser", self.cap_ser.compute(), on_epoch=True, logger=True)
+        self.log(
+            "train_avg_ser",
+            (self.cap_ser.compute()+self.punct_ser.compute())/2,
+            on_epoch=True,
+            logger=True,
+        )
+        self.cap_micro_f1.reset()
+        self.cap_macro_f1.reset()
+        self.punct_micro_f1.reset()
+        self.punct_macro_f1.reset()
 
     def validation_step(
         self, batch: Tuple[torch.Tensor], batch_nb: int, *args, **kwargs
@@ -358,13 +383,13 @@ class PunctuationPredictor(pl.LightningModule):
         """
         output = self.forward(*batch)
 
-        binary_pred, binary_target = (
-            torch.topk(output.binary_logits, 1)[1].view(-1),
+        cap_pred, cap_target = (
+            torch.topk(output.cap_logits, 1)[1].view(-1),
             batch[-2].view(-1),
         )
-        mask = (binary_target != -100).bool()
-        binary_pred = torch.masked_select(binary_pred, mask)
-        binary_target = torch.masked_select(binary_target, mask)
+        mask = (cap_target != -100).bool()
+        cap_pred = torch.masked_select(cap_pred, mask)
+        cap_target = torch.masked_select(cap_target, mask)
 
         punct_pred, punct_target = (
             torch.topk(output.punct_logits, 1)[1].view(-1),
@@ -373,10 +398,14 @@ class PunctuationPredictor(pl.LightningModule):
         mask = (punct_target != -100).bool()
         punct_pred = torch.masked_select(punct_pred, mask)
         punct_target = torch.masked_select(punct_target, mask)
-        self.log("binary_f1", self.binary_f1(binary_pred, binary_target), prog_bar=True)
-        self.log("micro_f1", self.micro_f1(punct_pred, punct_target), prog_bar=True)
-        self.log("macro_f1", self.macro_f1(punct_pred, punct_target), prog_bar=True)
-        self.log("ser", self.ser(punct_pred, punct_target), prog_bar=True)
+
+
+        self.log("cap_micro_f1", self.cap_micro_f1(cap_pred, cap_target), prog_bar=True)
+        self.log("cap_macro_f1", self.cap_macro_f1(cap_pred, cap_target), prog_bar=True)
+        self.log("punct_micro_f1", self.punct_micro_f1(punct_pred, punct_target), prog_bar=True)
+        self.log("punct_macro_f1", self.punct_macro_f1(punct_pred, punct_target), prog_bar=True)
+        self.log("punct_ser", self.punct_ser(punct_pred, punct_target), prog_bar=True)
+        self.log("cap_ser", self.cap_ser(cap_pred, cap_target), prog_bar=True)
         return output.loss
 
     def validation_epoch_end(
@@ -384,30 +413,45 @@ class PunctuationPredictor(pl.LightningModule):
     ) -> Dict[str, torch.Tensor]:
         # log epoch metric
         self.log(
-            "binary_f1",
-            self.binary_f1.compute(),
+            "cap_micro_f1",
+            self.cap_micro_f1.compute(),
             on_epoch=True,
             prog_bar=True,
             logger=True,
         )
         self.log(
-            "micro_f1",
-            self.micro_f1.compute(),
+            "cap_macro_f1",
+            self.cap_macro_f1.compute(),
             on_epoch=True,
             prog_bar=True,
             logger=True,
         )
         self.log(
-            "macro_f1",
-            self.macro_f1.compute(),
+            "punct_micro_f1",
+            self.punct_micro_f1.compute(),
             on_epoch=True,
             prog_bar=True,
             logger=True,
         )
-        self.log("ser", self.ser.compute(), on_epoch=True, prog_bar=True, logger=True)
-        self.binary_f1.reset()
-        self.micro_f1.reset()
-        self.macro_f1.reset()
+        self.log(
+            "punct_macro_f1",
+            self.punct_macro_f1.compute(),
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+        self.log("punct_ser", self.punct_ser.compute(), on_epoch=True, prog_bar=True, logger=True)
+        self.log("cap_ser", self.cap_ser.compute(), on_epoch=True, logger=True)
+        self.log(
+            "avg_ser",
+            (self.cap_ser.compute()+self.punct_ser.compute())/2,
+            on_epoch=True,
+            logger=True,
+        )
+        self.cap_micro_f1.reset()
+        self.cap_macro_f1.reset()
+        self.punct_micro_f1.reset()
+        self.punct_macro_f1.reset()
 
     @classmethod
     def from_experiment(cls, experiment_folder: str):

@@ -24,7 +24,9 @@ from tqdm import tqdm
 from models.data_module import MODEL_INPUTS, DataModule
 from models.punct_predictor import PunctuationPredictor
 from trainer import TrainerConfig, build_trainer
-
+from pytorch_lightning.metrics import F1
+from models.ser_metric import SlotErrorRate
+from models.data_module import PUNCTUATION_LABEL_ENCODER, CAPITALIZATION_LABEL_ENCODER
 
 @click.group()
 def cli():
@@ -59,7 +61,7 @@ def train(config: str) -> None:
     click.secho(f"{result}", fg="cyan")
 
     model = PunctuationPredictor(model_config.namespace())
-    data = DataModule(model.hparams, model.tokenizer)
+    data = DataModule(model.hparams, model.tokenizer, multiple_files_process=False)
     trainer.fit(model, data)
 
 
@@ -100,7 +102,7 @@ def train(config: str) -> None:
     help="Batch size used during inference.",
     type=int,
 )
-def predict(
+def test(
     model: str,
     language: str,
     test: bool,
@@ -117,7 +119,7 @@ def predict(
     prediction_dir = (
         prediction_dir if prediction_dir.endswith("/") else prediction_dir + "/"
     )
-    test_folder = dataset + f"{language}/" + ("test/" if test else "dev/")
+    # test_folder = dataset + f"{language}/" + ("test/" if test else "dev/")
     output_folder = prediction_dir + f"{language}/" + ("test/" if test else "dev/")
 
     if not os.path.exists(output_folder):
@@ -125,42 +127,111 @@ def predict(
 
     click.secho(f"Loading model from folder: {model}", fg="yellow")
     model = PunctuationPredictor.from_experiment(model)
-    data_module = DataModule(model.hparams, model.tokenizer)
+    data_module = DataModule(model.hparams, model.tokenizer, multiple_files_process=False)
 
     model.to("cuda")
-    for file in tqdm(
-        os.listdir(test_folder),
-        desc="Processing {} data...".format(test_folder),
-    ):
-        if file.endswith(".tsv"):
-            model_inputs = data_module.preprocess_file(test_folder + file, language)
-            model_inputs = data_module.pad_dataset(
-                model_inputs, padding=model.tokenizer.pad_token_id
-            )
-            file_data = []
-            for input_name in MODEL_INPUTS:
-                tensor = torch.tensor(model_inputs[input_name])
-                file_data.append(tensor)
 
-            dataloader = DataLoader(
-                TensorDataset(*file_data),
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=multiprocessing.cpu_count(),
-            )
-            binary_labels, punct_labels = [], []
-            for batch in dataloader:
-                bin_y_hat, punct_y_hat = model.predict(batch)
-                binary_labels += bin_y_hat
-                punct_labels += punct_y_hat
-            words = [
-                line.strip().split("\t")[0]
-                for line in open(test_folder + file).readlines()
-            ]
-            output = pd.DataFrame(
-                {"word": words, "binary": binary_labels, "punct": punct_labels}
-            )
-            output.to_csv(output_folder + file, sep="\t", header=None, index=False)
+    cap_micro_f1 = F1(num_classes=len(CAPITALIZATION_LABEL_ENCODER), average="micro")
+    cap_macro_f1 = F1(num_classes=len(CAPITALIZATION_LABEL_ENCODER), average="macro")
+    punct_micro_f1 = F1(num_classes=len(PUNCTUATION_LABEL_ENCODER), average="micro")
+    punct_macro_f1 = F1(num_classes=len(PUNCTUATION_LABEL_ENCODER), average="macro")
+    punct_ser = SlotErrorRate(padding=-100, ignore=0)
+    cap_ser = SlotErrorRate(padding=-100)
+
+    # for file in tqdm(
+    #     os.listdir(test_folder),
+    #     desc="Processing {} data...".format(test_folder),
+    # ):
+    #     if file.endswith(".tsv"):
+    #         # Saving the ground truth
+    #         model_inputs = data_module.preprocess_file(test_folder + file, language)
+            
+    #         # Getting all the predictions
+    #         model_inputs = data_module.pad_dataset(
+    #             model_inputs, padding=model.tokenizer.pad_token_id
+    #         )
+    #         file_data = []
+    #         for input_name in MODEL_INPUTS:
+    #             tensor = torch.tensor(model_inputs[input_name])
+    #             file_data.append(tensor)
+
+    #         dataloader = DataLoader(
+    #             TensorDataset(*file_data),
+    #             batch_size=batch_size,
+    #             shuffle=False,
+    #             num_workers=multiprocessing.cpu_count(),
+    #         )
+    #         cap_labels, punct_labels = [], []
+    #         for batch in dataloader:
+    #             cap_y_hat, punct_y_hat = model.predict(batch)
+    #             if (cap_y_hat is None) and (punct_y_hat is None):
+    #                 continue
+    #             cap_labels += cap_y_hat
+    #             punct_labels += punct_y_hat
+            
+    #         cap_micro_f1.update(torch.tensor([cap_labels]), torch.tensor(model_inputs["cap_label"]))
+    #         cap_macro_f1.update(torch.tensor([cap_labels]), torch.tensor(model_inputs["cap_label"]))
+    #         punct_micro_f1.update(torch.tensor([punct_labels]), torch.tensor(model_inputs["punct_label"]))
+    #         punct_macro_f1.update(torch.tensor([punct_labels]), torch.tensor(model_inputs["punct_label"]))
+    #         cap_ser.update(torch.tensor([cap_labels]), torch.tensor(model_inputs["cap_label"]))
+    #         punct_ser.update(torch.tensor([punct_labels]), torch.tensor(model_inputs["punct_label"]))
+
+    # Saving the ground truth
+    model_inputs = data_module.load_data_from_csv(dataset, testing=True, language=language)
+    model_inputs = model_inputs['test']
+    # Getting all the predictions
+    model_inputs = data_module.pad_dataset(
+        model_inputs, padding=model.tokenizer.pad_token_id
+    )
+    file_data = []
+    for input_name in MODEL_INPUTS:
+        tensor = torch.tensor(model_inputs[input_name])
+        file_data.append(tensor)
+
+    dataloader = DataLoader(
+        TensorDataset(*file_data),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=multiprocessing.cpu_count(),
+    )
+    for batch in dataloader:
+        print(batch[-1].shape)
+        punct_labels = batch[-1].view(-1)
+        print(punct_labels.shape)
+        mask = (punct_labels != -100).bool() # Let's remove padding
+        punct_labels = torch.masked_select(punct_labels, mask)
+        print(punct_labels.shape)
+        cap_y_hat, punct_y_hat = model.predict(batch, encode=False)
+        if (cap_y_hat is None) and (punct_y_hat is None):
+            continue
+        
+        punct_labels = batch[-1].view(-1)
+        mask = (punct_labels != -100).bool() # Let's remove padding
+        punct_labels = torch.masked_select(punct_labels, mask)
+
+        cap_labels = batch[-2].view(-1)
+        mask = (cap_labels != -100).bool() # Let's remove padding
+        cap_labels = torch.masked_select(cap_labels, mask)
+
+        # RuntimeError: The size of tensor a (377) must match the size of tensor b (376) at non-singleton dimension 1
+        cap_micro_f1.update(torch.tensor(cap_y_hat), torch.tensor(cap_labels))
+        cap_macro_f1.update(torch.tensor(cap_y_hat), torch.tensor(cap_labels))
+        punct_micro_f1.update(torch.tensor(punct_y_hat), torch.tensor(punct_labels))
+        punct_macro_f1.update(torch.tensor(punct_y_hat), torch.tensor(punct_labels))
+        cap_ser.update(torch.tensor(cap_y_hat), torch.tensor(cap_labels))
+        punct_ser.update(torch.tensor(punct_y_hat), torch.tensor(punct_labels))
+
+
+    click.secho("Capitalisation micro F1 Score {}".format( cap_micro_f1.compute() ))
+    click.secho("Capitalisation macro F1 Score {}".format(cap_macro_f1.compute()))
+    click.secho("Capitalisation SER {}".format(cap_ser.compute()))
+
+    click.secho("Punctuation micro F1 Score {}".format(punct_micro_f1.compute()))
+    click.secho("Punctuation macro F1 Score {}".format(punct_macro_f1.compute()))
+    click.secho("Punctuation SER {}".format(punct_ser.compute()))
+
+
+
 
 
 @cli.command(name="search")

@@ -31,6 +31,6 @@ keep_embeddings_frozen: True
 learning_rate: 0.00023628315040013953
 layerwise_decay: 0.925050299197838
 encoder_learning_rate: 2.5745367673749778e-05
-binary_loss: 1
+cap_loss: 1
 punct_loss: 2
 language_factors: False
