@@ -245,19 +245,13 @@ class PunctuationPredictor(pl.LightningModule):
         with torch.no_grad():
             batch = [model_input.cuda() for model_input in batch]
             output = self.forward(*batch)
-            print("Model output {}".format(output.cap_logits.shape))
             cap_pred = torch.topk(output.cap_logits, 1)[1].view(-1)
-            print("After topk {}".format(cap_pred.shape))
-            print("Topk without view(-1){}".format(torch.topk(output.cap_logits, 1)[1].shape))
-            
             punct_pred = torch.topk(output.punct_logits, 1)[1].view(-1)
-            cap_pred = torch.masked_select(cap_pred, mask.view(-1).cuda())
-            print("After mask {}".format(cap_pred.shape))
-            print('-----')
-            punct_pred = torch.masked_select(punct_pred, mask.view(-1).cuda())
-            punct_pred = punct_pred.cpu().tolist()
-            cap_pred = cap_pred.cpu().tolist()
             if encode:
+                cap_pred = torch.masked_select(cap_pred, mask.view(-1).cuda())
+                punct_pred = torch.masked_select(punct_pred, mask.view(-1).cuda())
+                punct_pred = punct_pred.cpu().tolist()
+                cap_pred = cap_pred.cpu().tolist()
                 punct_pred = [punct_label_decoder[label] for label in punct_pred]
                 cap_pred = [cap_label_decoder[label] for label in cap_pred]
             return cap_pred, punct_pred
