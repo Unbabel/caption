@@ -7,9 +7,10 @@ Punctuation Predictor
 import os
 from argparse import Namespace
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import click
+from click.termui import secho
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
@@ -68,7 +69,7 @@ class PunctuationPredictor(pl.LightningModule):
         cap_loss: int = 1
         punct_loss: int = 1
 
-    def __init__(self, hparams: Namespace):
+    def __init__(self, hparams: Namespace, load_weights_from_checkpoint: Optional[str] = None):
         super().__init__()
         self.hparams = hparams
         self.tokenizer = AutoTokenizer.from_pretrained(self.hparams.pretrained_model)
@@ -105,6 +106,12 @@ class PunctuationPredictor(pl.LightningModule):
         self.cap_ser = SlotErrorRate(padding=-100)
         self.punct_loss_fct = nn.CrossEntropyLoss(ignore_index=-100) # Using the ignore_index prevents the model from learning that PAD is followed by PAD
         self.cap_loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+
+        if load_weights_from_checkpoint is not None:
+            if os.path.exists(load_weights_from_checkpoint):
+                self.load_weights_from_punctuation_model(load_weights_from_checkpoint)
+            else:
+                secho(f"Path {load_weights_from_checkpoint} does not exist!")
 
     def freeze_embeddings(self) -> None:
         """ Freezes the encoder layer. """
@@ -201,9 +208,9 @@ class PunctuationPredictor(pl.LightningModule):
         cap_logits = self.cap_head(self.head_dropout(adjacent_embeddings))
         punct_logits = self.punct_head(self.head_dropout(adjacent_embeddings))
 
+
         if (cap_labels is not None) and (punct_labels is not None):
             cap_loss = self.cap_loss_fct(
-                #TODO(joao.janeiro@) Is this only ignoring the first character of the batch? Or ignoring the first character of every sentence?
                 cap_logits.view(-1, cap_logits.size(-1))[1:, :], cap_labels.view(-1)[1:] # We ignore the first position, so it doesn't learn to capitalise based on position
             )
             punct_loss = self.punct_loss_fct(
@@ -447,6 +454,34 @@ class PunctuationPredictor(pl.LightningModule):
         self.punct_micro_f1.reset()
         self.punct_macro_f1.reset()
 
+    def load_weights_from_punctuation_model(self, checkpoint: str) -> None:
+        """Function that loads the weights from a given checkpoint file.
+        Note:
+            If the checkpoint model architecture is different then `self`, only
+            the common parts will be loaded.
+        :param checkpoint: Path to the checkpoint containing the weights to be loaded.
+        """
+        checkpoint = checkpoint if checkpoint.endswith("/") else checkpoint + "/"
+        checkpoints = [
+            file
+            for file in os.listdir(checkpoint + "checkpoints/")
+            if file.endswith(".ckpt")
+        ]
+        checkpoint_path = os.path.join(
+            checkpoint + "checkpoints/", checkpoints[-1]
+        )
+
+        secho(f"Loading weights from {checkpoint_path}.")
+        checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
+        pretrained_dict = checkpoint["state_dict"]
+        model_dict = self.state_dict()
+        # 1. filter out unnecessary keys
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+        # 2. overwrite entries in the existing state dict
+        model_dict.update(pretrained_dict)
+        # 3. load the new state dict
+        self.load_state_dict(model_dict, strict=False)
+
     @classmethod
     def from_experiment(cls, experiment_folder: str):
         """Function that loads the model from an experiment folder.
@@ -471,3 +506,4 @@ class PunctuationPredictor(pl.LightningModule):
         model.eval()
         model.freeze()
         return model
+

@@ -158,7 +158,11 @@ def test(
         cap_micro_f1.update(cap_pred, cap_target)
         cap_macro_f1.update(cap_pred, cap_target)
         punct_micro_f1.update(punct_pred, punct_target)
-        punct_macro_f1.update(punct_pred, punct_target)
+        preds = punct_macro_f1(punct_pred, punct_target)
+        if preds < 0.2:
+            print(batch[0])
+        elif preds > 0.8:
+            print(batch[0])
         cap_ser.update(cap_pred, cap_target)
         punct_ser.update(punct_pred, punct_target)
 
@@ -271,6 +275,40 @@ def predict(
             )
             output.to_csv(output_folder + file, sep="\t", header=None, index=False)
 
+
+@cli.command(name="finetune")
+@click.option(
+    "--model",
+    type=click.Path(exists=True),
+    required=True,
+    help="Folder containing the config files and model checkpoints.",
+)
+@click.option(
+    "--config",
+    "-f",
+    type=click.Path(exists=True),
+    required=True,
+    help="Path to the configure YAML file",
+)
+def finetune(
+    model: str,
+    config: str
+) -> None:
+    """Testing function where a trained model is tested in its ability to rank candidate
+    answers and produce replies.
+    """
+
+    yaml_file = yaml.load(open(config).read(), Loader=yaml.FullLoader)
+    # Build Trainer
+    train_configs = TrainerConfig(yaml_file)
+    seed_everything(train_configs.seed)
+    trainer = build_trainer(train_configs.namespace())
+
+    model_config = PunctuationPredictor.ModelConfig(yaml_file)
+    click.secho(f"Loading model from folder: {model}", fg="yellow")
+    model = PunctuationPredictor(model_config.namespace(), model)
+    data = DataModule(model.hparams, model.tokenizer, multiple_files_process=False)
+    trainer.fit(model, data)
 
 
 @cli.command(name="search")
