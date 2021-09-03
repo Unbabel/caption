@@ -20,41 +20,22 @@ import pandas as pd
 
 SEPP_NLG_URL = "https://unbabel-experimental-data-sets.s3-eu-west-1.amazonaws.com/video-pt2020/sepp_nlg_2021_train_dev_data.zip"
 
+
 PUNCTUATION_LABEL_ENCODER = {
-    "0": 0,
-    "(": 1,
-    ")": 2,
-    ":": 3,
-    ".": 4,
-    ",": 5,
-    "/": 6,
-    "-": 7,
-    "%": 8,
-    "&": 9,
-    "'": 10,
-    ";": 11,
-    "!": 12,
-    "?": 13,
-    "1": 14,
-    "+": 15,
-    "[": 16,
-    "]": 17,
-    '"': 18,
-    "$": 19,
-    "€": 19,
-    "*": 20,
-    "=": 21,
-    "_": 22,
-    "-.": 23,
-    "@": 24,
-    "\\": 25,
-    ">": 26,
-    "./": 27,
-    "`": 28,
-    "'(": 29,
-    "<": 30,
-    "{": 31,
-    "}": 32,
+    '0': 0,
+    'P': 1,
+    'C': 2,
+    'Q': 3
+}
+PUNCTUATION_GROUP = {
+    '0': '0',
+    '.': 'P',
+    '!': 'P',
+    ';': 'P',
+    ',': 'C',
+    ':': 'C',
+    '-': 'C',
+    '?': 'Q'
 }
 CAPITALIZATION_LABEL_ENCODER = {
     "L": 0,
@@ -127,9 +108,12 @@ class DataModule(pl.LightningDataModule):
             )
             model_inputs["input_ids"][-1] += subwords
             if not testing:
-                model_inputs["cap_label"][-1].append(CAPITALIZATION_LABEL_ENCODER[capitalisation])
-                if punctuation in PUNCTUATION_LABEL_ENCODER.keys():
-                    model_inputs["punct_label"][-1].append(PUNCTUATION_LABEL_ENCODER[punctuation])
+                if capitalisation in CAPITALIZATION_LABEL_ENCODER.keys():
+                    model_inputs["cap_label"][-1].append(CAPITALIZATION_LABEL_ENCODER[capitalisation])
+                else:
+                    model_inputs["cap_label"][-1].append(0)
+                if punctuation in PUNCTUATION_GROUP.keys():
+                    model_inputs["punct_label"][-1].append(PUNCTUATION_LABEL_ENCODER[PUNCTUATION_GROUP[punctuation]])
                 else:
                     model_inputs["punct_label"][-1].append(0)
 
@@ -150,9 +134,12 @@ class DataModule(pl.LightningDataModule):
             )
             model_inputs["input_ids"][-1] += subwords
             if not testing:
-                model_inputs["cap_label"][-1].append(CAPITALIZATION_LABEL_ENCODER[capitalisation])
-                if punctuation in PUNCTUATION_LABEL_ENCODER.keys():
-                    model_inputs["punct_label"][-1].append(PUNCTUATION_LABEL_ENCODER[punctuation])
+                if capitalisation in CAPITALIZATION_LABEL_ENCODER.keys():
+                    model_inputs["cap_label"][-1].append(CAPITALIZATION_LABEL_ENCODER[capitalisation])
+                else:
+                    model_inputs["cap_label"][-1].append(0)
+                if punctuation in PUNCTUATION_GROUP.keys():
+                    model_inputs["punct_label"][-1].append(PUNCTUATION_LABEL_ENCODER[PUNCTUATION_GROUP[punctuation]])
                 else:
                     model_inputs["punct_label"][-1].append(0)
         return model_inputs
@@ -305,7 +292,7 @@ class DataModule(pl.LightningDataModule):
 
             dataset_path = "../data_pre_processing/comet-data/processed_data/"
         else:
-            dataset_path = "../data_pre_processing/comet-data/single_files/"
+            dataset_path = "../data_pre_processing/comet-data/single_files_aggregated/"
 
         dataset_hash = (
             int(hashlib.sha256(dataset_path.encode("utf-8")).hexdigest(), 16) % 10 ** 8

@@ -94,8 +94,10 @@ class PunctuationPredictor(pl.LightningModule):
             dropout=self.hparams.dropout,
         )
         self.head_dropout = nn.Dropout(self.hparams.dropout)
-        self.cap_head = nn.Linear(2 * self.encoder.config.hidden_size, len(CAPITALIZATION_LABEL_ENCODER))
-        self.punct_head = nn.Linear(
+        self.cap_head = nn.Linear(
+            2 * self.encoder.config.hidden_size, len(CAPITALIZATION_LABEL_ENCODER)
+        )
+        self.punctuation_head = nn.Linear(
             2 * self.encoder.config.hidden_size, len(PUNCTUATION_LABEL_ENCODER)
         )
         self.cap_micro_f1 = F1(num_classes=len(CAPITALIZATION_LABEL_ENCODER), average="micro")
@@ -103,7 +105,7 @@ class PunctuationPredictor(pl.LightningModule):
         self.punct_micro_f1 = F1(num_classes=len(PUNCTUATION_LABEL_ENCODER), average="micro")
         self.punct_macro_f1 = F1(num_classes=len(PUNCTUATION_LABEL_ENCODER), average="macro")
         self.punct_ser = SlotErrorRate(padding=-100, ignore=0)
-        self.cap_ser = SlotErrorRate(padding=-100)
+        self.cap_ser = SlotErrorRate(padding=-100) 
         self.punct_loss_fct = nn.CrossEntropyLoss(ignore_index=-100) # Using the ignore_index prevents the model from learning that PAD is followed by PAD
         self.cap_loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
 
@@ -160,7 +162,7 @@ class PunctuationPredictor(pl.LightningModule):
         )
         top_layers_parameters = [
             {"params": self.cap_head.parameters(), "lr": self.hparams.learning_rate},
-            {"params": self.punct_head.parameters(), "lr": self.hparams.learning_rate},
+            {"params": self.punctuation_head.parameters(), "lr": self.hparams.learning_rate},
             {"params": self.scalar_mix.parameters(), "lr": self.hparams.learning_rate},
         ]
         optimizer = AdamW(
@@ -206,7 +208,7 @@ class PunctuationPredictor(pl.LightningModule):
             2 * self.encoder.config.hidden_size,
         )
         cap_logits = self.cap_head(self.head_dropout(adjacent_embeddings))
-        punct_logits = self.punct_head(self.head_dropout(adjacent_embeddings))
+        punct_logits = self.punctuation_head(self.head_dropout(adjacent_embeddings))
 
 
         if (cap_labels is not None) and (punct_labels is not None):
@@ -259,6 +261,7 @@ class PunctuationPredictor(pl.LightningModule):
                 punct_pred = torch.masked_select(punct_pred, mask.view(-1).cuda())
                 punct_pred = punct_pred.cpu().tolist()
                 cap_pred = cap_pred.cpu().tolist()
+                # TODO(joao.janeiro@): This will probably error out, since the match is no longer 1-to-1, same key for multiple values
                 punct_pred = [punct_label_decoder[label] for label in punct_pred]
                 cap_pred = [cap_label_decoder[label] for label in cap_pred]
             return cap_pred, punct_pred

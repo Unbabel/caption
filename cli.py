@@ -109,6 +109,7 @@ def test(
 
     model.to("cuda")
 
+
     cap_micro_f1 = F1(num_classes=len(CAPITALIZATION_LABEL_ENCODER), average="micro")
     cap_macro_f1 = F1(num_classes=len(CAPITALIZATION_LABEL_ENCODER), average="macro")
     punct_micro_f1 = F1(num_classes=len(PUNCTUATION_LABEL_ENCODER), average="micro")
@@ -158,11 +159,7 @@ def test(
         cap_micro_f1.update(cap_pred, cap_target)
         cap_macro_f1.update(cap_pred, cap_target)
         punct_micro_f1.update(punct_pred, punct_target)
-        preds = punct_macro_f1(punct_pred, punct_target)
-        if preds < 0.2:
-            print(batch[0])
-        elif preds > 0.8:
-            print(batch[0])
+        punct_macro_f1.update(punct_pred, punct_target)
         cap_ser.update(cap_pred, cap_target)
         punct_ser.update(punct_pred, punct_target)
 
