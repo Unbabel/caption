@@ -5,6 +5,14 @@ In this repository, we explore different strategies for automatic transcription 
 
 > [Download IWSLT corpus](https://unbabel-experimental-data-sets.s3-eu-west-1.amazonaws.com/video-pt2020/IWSLT-punkt.tar.gz)
 
+# Publications:
+- [Multilingual Simultaneous Sentence End and Punctuation Prediction](http://ceur-ws.org/Vol-2957/sepp_paper3.pdf)
+- [Towards better subtitles: A multilingual approach for punctuation restoration of speech transcripts](https://www.sciencedirect.com/science/article/abs/pii/S0957417421011180)
+- [Automatic truecasing of video subtitles using BERT: a multilingual adaptable approach](https://link.springer.com/chapter/10.1007/978-3-030-50146-4_52)
+
+## Sentence end and punctuation prediction shared task
+To replicate our winning submission to SEPP 2021 please go to the `shared-task` branch.
+
 ## Model architecture:
 
 ![base_model](images/base_model.png)
